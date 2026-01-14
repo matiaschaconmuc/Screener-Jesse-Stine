@@ -6,26 +6,17 @@ import time
 import requests
 import io
 
-# --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Stine Superstock Screener", layout="wide")
 
-# --- DESCRIPCIÓN ---
 st.title("🚀 Jesse Stine: Insider Buy Superstock Screener")
-st.markdown("""
-Esta herramienta busca acciones que cumplen con los criterios técnicos del libro de Jesse Stine:
-* **Precios bajos:** Acciones baratas (generalmente < $15).
-* **Bases planas:** Consolidaciones de varias semanas con poca volatilidad.
-* **Explosión de volumen:** El "Grial" es un aumento masivo del volumen semanal (> 500%).
-* **Cruce de SMA 30:** Precio superando la media móvil de 30 semanas.
-""")
 
-# --- SIDEBAR (CONFIGURACIÓN) ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Parámetros del Modelo")
-    min_p = st.number_input("Precio Mínimo ($)", value=1.0)
-    max_p = st.number_input("Precio Máximo ($)", value=15.0)
+    min_p = st.number_input("Precio Mínimo ($)", value=1.0, step=0.5)
+    max_p = st.number_input("Precio Máximo ($)", value=15.0, step=0.5)
     min_vol = st.number_input("Vol. Semanal Mínimo", value=1000)
-    rango_base_max = st.slider("Rango de Base Máximo (%)", 5, 40, 20)
+    rango_base_max = st.slider("Rango de Base Máximo (%)", 5, 50, 20)
     semanas_base = st.slider("Semanas de la Base", 10, 52, 30)
     
     st.divider()
@@ -34,11 +25,17 @@ with st.sidebar:
     
     ejecutar = st.button("🚀 Ejecutar Screener", use_container_width=True)
 
-# --- FUNCIONES DE APOYO ---
-@st.cache_data
+# --- LOGICA MEJORADA ---
 def obtener_universo():
     universo = set()
     headers = {'User-Agent': 'Mozilla/5.0'}
+    # Intentamos obtener NASDAQ
+    try:
+        url_nas = "ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt"
+        df_n = pd.read_csv(url_nas, sep="|")
+        universo.update(df_n[df_n['Test Issue'] == 'N']['Symbol'].dropna().astype(str).tolist())
+    except: pass
+    
     # S&P 400 y 600
     urls = ["https://en.wikipedia.org/wiki/List_of_S%26P_400_companies", 
             "https://en.wikipedia.org/wiki/List_of_S%26P_600_companies"]
@@ -56,45 +53,51 @@ def obtener_universo():
 
 def plot_stock(ticker, df):
     fig = go.Figure()
-    # Velas
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
                                 low=df['Low'], close=df['Close'], name="Precio"))
-    # SMA 30
     fig.add_trace(go.Scatter(x=df.index, y=df['SMA_30'], line=dict(color='orange', width=2), name="SMA 30"))
-    
     fig.update_layout(title=f"Gráfico Semanal: {ticker}", xaxis_rangeslider_visible=False, height=400)
     return fig
 
-# --- EJECUCIÓN DEL SCREENER ---
 if ejecutar:
     tickers = obtener_universo()
-    st.info(f"📡 Universo cargado: {len(tickers)} acciones analizando...")
+    st.info(f"📡 Analizando {len(tickers)} acciones...")
     
     superstocks = []
     watchlist = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    lote_size = 50
+    lote_size = 40 # Lote un poco más pequeño para mayor estabilidad
     for i in range(0, len(tickers), lote_size):
         lote = tickers[i:i+lote_size]
-        progress_bar.progress(min((i + lote_size) / len(tickers), 1.0))
+        progress_val = min((i + lote_size) / len(tickers), 1.0)
+        progress_bar.progress(progress_val)
+        status_text.text(f"Procesando: {lote[0]}... ({int(progress_val*100)}%)")
         
         try:
-            data = yf.download(lote, period="2y", interval="1wk", group_by='ticker', progress=False)
+            # DESCARGA: Se añade auto_adjust=True para que coincida con tu original
+            data = yf.download(lote, period="2y", interval="1wk", group_by='ticker', 
+                               auto_adjust=True, progress=False)
             
             for ticker in lote:
                 try:
-                    df = data[ticker].dropna()
+                    # Si el lote tiene más de un ticker, yfinance devuelve MultiIndex
+                    if len(lote) > 1:
+                        df = data[ticker].dropna()
+                    else:
+                        df = data.dropna()
+                        
                     if len(df) < 51: continue
 
                     last_close = df['Close'].iloc[-1]
                     last_vol = df['Volume'].iloc[-1]
 
-                    # Filtros básicos
+                    # 1. Filtros de Precio y Volumen Mínimo
                     if not (min_p <= last_close <= max_p) or last_vol < min_vol:
                         continue
 
-                    # Análisis Técnico
+                    # 2. Medias y Base
                     df['SMA_30'] = df['Close'].rolling(window=30).mean()
                     avg_vol_previo = df['Volume'].iloc[-11:-1].mean()
                     
@@ -103,7 +106,7 @@ if ejecutar:
                     
                     if rango_base > rango_base_max: continue
 
-                    # Cruce SMA 30
+                    # 3. Condición de Cruce (Breakout)
                     c_sma = (last_close > df['SMA_30'].iloc[-1] and df['Close'].iloc[-2] <= df['SMA_30'].iloc[-2])
                     
                     if c_sma:
@@ -117,28 +120,28 @@ if ejecutar:
                             watchlist.append(res)
                 except: continue
         except: continue
-        time.sleep(0.5)
+        time.sleep(0.2)
 
-    # --- MOSTRAR RESULTADOS ---
+    status_text.success("✅ ¡Escaneo finalizado!")
+
+    # --- RESULTADOS ---
     st.divider()
-    
-    # Categoría Diamante
-    st.subheader("💎 Acciones Diamante (Superstocks)")
+    col1, col2 = st.columns(2)
+    col1.metric("Diamantes 💎", len(superstocks))
+    col2.metric("Watchlist 👀", len(watchlist))
+
     if superstocks:
-        df_diamante = pd.DataFrame(superstocks).drop(columns=['df'])
-        st.table(df_diamante)
+        st.subheader("🏆 CATEGORÍA DIAMANTE")
+        st.dataframe(pd.DataFrame(superstocks).drop(columns=['df']), use_container_width=True)
         for s in superstocks:
             st.plotly_chart(plot_stock(s['Ticker'], s['df']), use_container_width=True)
-    else:
-        st.write("No se encontraron Superstocks en este momento.")
 
-    # Categoría Watchlist
-    st.subheader("👀 Watchlist de Seguimiento")
     if watchlist:
-        df_watch = pd.DataFrame(watchlist).drop(columns=['df'])
-        st.table(df_watch)
+        st.subheader("👀 WATCHLIST / SEGUIMIENTO")
+        st.dataframe(pd.DataFrame(watchlist).drop(columns=['df']), use_container_width=True)
         for w in watchlist:
             with st.expander(f"Ver gráfico de {w['Ticker']}"):
                 st.plotly_chart(plot_stock(w['Ticker'], w['df']), use_container_width=True)
-    else:
-        st.write("No hay acciones en la lista de seguimiento.")
+    
+    if not superstocks and not watchlist:
+        st.warning("No se encontraron acciones con los parámetros actuales.")
