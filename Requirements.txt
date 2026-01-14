@@ -1,5 +1,7 @@
 yfinance
 pandas
+numpy
+plotly
 requests
 openpyxl
 lxml
